@@ -5,7 +5,7 @@
  * Course: Advanced Computer Architecture, Uppsala University
  * Course Part: Lab assignment 3
  *
- * Original author: Frédéric Haziza <daz@it.uu.se>
+ * Original author: Frï¿½dï¿½ric Haziza <daz@it.uu.se>
  * Heavily modified by: Andreas Sandberg <andreas.sandberg@it.uu.se>
  *
  */
@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <semaphore.h>
+
 
 #include "gs_interface.h"
 
@@ -28,11 +30,13 @@ const int gsi_is_parallel = 1;
 typedef struct {
         int thread_id;
         pthread_t thread;
-
+        int thread_to_left;
         volatile double error;
-
+        sem_t rows_complete;
         /* TASK: Do you need any thread local state for synchronization? */
 } thread_info_t;
+
+pthread_barrier_t barrier;
 
 /** Define to enable debug mode */
 #define DEBUG 0 /* 1 */
@@ -66,6 +70,15 @@ gsi_init()
         global_error = gs_tolerance + 1;
 
         /* TASK: Initialize global variables here */
+
+        pthread_barrier_init(&barrier, NULL, gs_nthreads);
+        /* Initialize thread-data */
+        int to_left = -1;
+        for(int i = 0; i < gs_nthreads; i++) {
+          threads[i].rows_complete = 0;
+          threads[i].thread_to_left = to_left;
+          to_left = threads[i].thread_id;
+        }
 }
 
 void
@@ -76,16 +89,19 @@ gsi_finish()
         /* TASK: Be nice and cleanup the stuff you initialized in
          * gsi_init()
          */
+        pthread_barrier_destroy(&barrier);
 
         if (threads)
                 free(threads);
+
+
 }
 
 static void
 thread_sweep(int tid, int iter, int lbound, int rbound)
 {
         threads[tid].error = 0.0;
-
+        thread_info_t self = threads[tid];
         for (int row = 1; row < gs_size - 1; row++) {
                 dprintf("%d: checking wait condition\n"
                         "\titeration: %i, row: %i\n",
@@ -94,6 +110,8 @@ thread_sweep(int tid, int iter, int lbound, int rbound)
 
                 /* TASK: Wait for data to be available from the thread
                  * to the left */
+                 if(self.thread_to_left != -1)
+                    sem_wait(&(threads[self.thread_to_left].rows_complete));
 
                 dprintf("%d: Starting on row: %d\n", tid, row);
 
@@ -111,7 +129,7 @@ thread_sweep(int tid, int iter, int lbound, int rbound)
 
                 /* TASK: Tell the thread to the right that this thread
                  * is done */
-
+                sem_post(self.rows_complete);
                 dprintf("%d: row %d done\n", tid, row);
         }
 
@@ -129,9 +147,13 @@ thread_compute(void *_self)
         int lbound, rbound;
 
         /* TASK: Compute bounds for this thread */
+        float cols_per_thread = (float) gs_width/(float) gs_nthreads;
+        lbound = (int) ceil(tid*cols_per_thread);
+        rbound = (int) floor((tid*cols_per_thread)+cols_per_thread);
 
         gs_verbose_printf("%i: lbound: %i, rbound: %i\n",
                           tid, lbound, rbound);
+
 
         for (int iter = 0;
              iter < gs_iterations && global_error > gs_tolerance;
@@ -147,9 +169,17 @@ thread_compute(void *_self)
                 /* Hint: Which thread is guaranteed to complete its
                  * sweep last? */
 
+                if (rbound == gs_width) {
+                  global_error = 0;
+                  for (int i = 0; i < gs_nthreads; i++) {
+                    global_error = max(global_error, threads[i].error);
+                  }
+                }
+
                 dprintf("%d: iteration %d done\n", tid, iter);
 
                 /* TASK: Iteration barrier */
+
         }
 
         gs_verbose_printf(
@@ -182,7 +212,7 @@ gsi_calculate()
                         exit(EXIT_FAILURE);
                 }
         }
-  
+
         /* Calling pthread_join on a thread will block until the
          * thread terminates. Since we are joining all threads, we
          * wait until all threads have exited. */
